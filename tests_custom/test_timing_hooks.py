@@ -925,3 +925,126 @@ class TestQuantizationHelpers:
     def test_quantize_bits_invalid_defaults_to_8(self):
         with patch.dict(os.environ, {"PDF_QUANTIZE_BITS": "16"}, clear=True):
             assert _quantize_bits() == 8
+
+
+def _make_quant_engine():
+    """Build a minimal fake ocr_engine for _enable_quantization tests.
+    Reuses the same shape as _make_vl_engine."""
+    fake_infer = MagicMock()
+
+    fake_vl_model = MagicMock()
+    fake_vl_model.infer = fake_infer
+    # Ensure _quantization_enabled is absent initially
+    del fake_vl_model._quantization_enabled
+
+    fake_pipeline = MagicMock()
+    fake_pipeline.vl_rec_model = fake_vl_model
+
+    fake_outer = MagicMock()
+    fake_outer._pipeline = fake_pipeline
+
+    fake_engine = MagicMock()
+    fake_engine.paddlex_pipeline = fake_outer
+    return fake_engine, fake_vl_model, fake_infer
+
+
+def _make_torchao(int8_instance=None, int4_instance=None, quantize_raises=False):
+    """Build a fake torchao.quantization module."""
+    mock_quant = MagicMock()
+    mock_quant.Int8WeightOnlyConfig.return_value = int8_instance or object()
+    mock_quant.Int4WeightOnlyConfig.return_value = int4_instance or object()
+    if quantize_raises:
+        mock_quant.quantize_.side_effect = RuntimeError("unsupported")
+    return mock_quant
+
+
+class TestEnableQuantization:
+    def test_int8_applied(self):
+        """quantize_() called with Int8WeightOnlyConfig instance when bits=8."""
+        engine, vl_model, fake_infer = _make_quant_engine()
+        int8_sentinel = object()
+        mock_quant = _make_torchao(int8_instance=int8_sentinel)
+
+        with patch.dict(sys.modules, {"torchao": MagicMock(), "torchao.quantization": mock_quant}), \
+             patch.dict(os.environ, {"PDF_QUANTIZE_BITS": "8"}, clear=True):
+            _enable_quantization(engine)
+
+        mock_quant.quantize_.assert_called_once_with(fake_infer, int8_sentinel)
+
+    def test_int4_applied(self):
+        """quantize_() called with Int4WeightOnlyConfig instance when bits=4."""
+        engine, vl_model, fake_infer = _make_quant_engine()
+        int4_sentinel = object()
+        mock_quant = _make_torchao(int4_instance=int4_sentinel)
+
+        with patch.dict(sys.modules, {"torchao": MagicMock(), "torchao.quantization": mock_quant}), \
+             patch.dict(os.environ, {"PDF_QUANTIZE_BITS": "4"}, clear=True):
+            _enable_quantization(engine)
+
+        mock_quant.quantize_.assert_called_once_with(fake_infer, int4_sentinel)
+
+    def test_sets_quantization_enabled_flag(self):
+        """_quantization_enabled is set on vl_model after success."""
+        engine, vl_model, _ = _make_quant_engine()
+        mock_quant = _make_torchao()
+
+        with patch.dict(sys.modules, {"torchao": MagicMock(), "torchao.quantization": mock_quant}), \
+             patch.dict(os.environ, {}, clear=True):
+            _enable_quantization(engine)
+
+        assert vl_model._quantization_enabled is True
+
+    def test_import_error_is_noop(self, caplog):
+        """ImportError from torchao → model unchanged, warning logged."""
+        engine, vl_model, fake_infer = _make_quant_engine()
+
+        with patch.dict(sys.modules, {"torchao": None, "torchao.quantization": None}), \
+             caplog.at_level(logging.WARNING):
+            _enable_quantization(engine)
+
+        assert not getattr(vl_model, "_quantization_enabled", False)
+        assert "[Quant]" in caplog.text
+
+    def test_quantize_raises_is_noop(self, caplog):
+        """quantize_() exception → model stays unchanged, warning logged."""
+        engine, vl_model, _ = _make_quant_engine()
+        mock_quant = _make_torchao(quantize_raises=True)
+
+        with patch.dict(sys.modules, {"torchao": MagicMock(), "torchao.quantization": mock_quant}), \
+             patch.dict(os.environ, {}, clear=True), \
+             caplog.at_level(logging.WARNING):
+            _enable_quantization(engine)
+
+        assert not getattr(vl_model, "_quantization_enabled", False)
+        assert "[Quant]" in caplog.text
+
+    def test_double_install_skipped(self, caplog):
+        """Second call is no-op when _quantization_enabled already set."""
+        engine, vl_model, fake_infer = _make_quant_engine()
+        vl_model._quantization_enabled = True
+        mock_quant = _make_torchao()
+
+        with patch.dict(sys.modules, {"torchao": MagicMock(), "torchao.quantization": mock_quant}), \
+             patch.dict(os.environ, {}, clear=True), \
+             caplog.at_level(logging.WARNING):
+            _enable_quantization(engine)
+
+        mock_quant.quantize_.assert_not_called()
+        assert "[Quant]" in caplog.text
+
+    def test_no_vl_rec_model_skipped(self, caplog):
+        """Missing vl_rec_model → silent skip with warning."""
+        fake_pipeline = MagicMock(spec=[])  # no vl_rec_model attribute
+        fake_outer = MagicMock()
+        fake_outer._pipeline = fake_pipeline
+        fake_engine = MagicMock()
+        fake_engine.paddlex_pipeline = fake_outer
+        mock_quant = _make_torchao()
+
+        with patch.dict(sys.modules, {"torchao": MagicMock(), "torchao.quantization": mock_quant}), \
+             patch.dict(os.environ, {}, clear=True), \
+             caplog.at_level(logging.WARNING):
+            _enable_quantization(fake_engine)
+
+        mock_quant.quantize_.assert_not_called()
+        assert "[Quant]" in caplog.text

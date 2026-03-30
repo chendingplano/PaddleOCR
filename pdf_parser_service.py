@@ -187,11 +187,55 @@ def _quantize_bits() -> int:
 
 
 def _enable_quantization(ocr_engine) -> None:
-    """Enable quantization on the OCR engine if configured.
+    """Quantize VLM model weights using torchao weight-only quantization.
 
-    Applies quantization with the specified bit depth when PDF_QUANTIZE_ENABLED=true.
+    Must be called BEFORE _enable_mps_acceleration: torchao quantize_() operates
+    on CPU tensors; moving the quantized model to MPS afterward is safe.
+
+    PDF_QUANTIZE_BITS=8  → Int8WeightOnlyConfig  (recommended; 2× memory savings,
+                           reliable on Apple Silicon CPU via NEON)
+    PDF_QUANTIZE_BITS=4  → Int4WeightOnlyConfig  (4× memory savings; torchao INT4
+                           GEMM is CUDA-optimized — verify timing on CPU before
+                           relying on this)
+
+    On any failure (import error, quantize_() raises), logs a warning and leaves
+    the model unchanged — no crash.
     """
-    pass
+    try:
+        from torchao.quantization import (
+            Int4WeightOnlyConfig,
+            Int8WeightOnlyConfig,
+            quantize_,
+        )
+    except ImportError:
+        log.warning("[Quant] torchao not installed — quantization skipped")
+        return
+
+    outer = ocr_engine.paddlex_pipeline
+    pipeline = getattr(outer, "_pipeline", outer)
+
+    if not hasattr(pipeline, "vl_rec_model"):
+        log.warning("[Quant] vl_rec_model not found — skipping")
+        return
+
+    vl_model = pipeline.vl_rec_model
+
+    if getattr(vl_model, "_quantization_enabled", False):
+        log.warning("[Quant] already enabled — skipping")
+        return
+
+    bits = _quantize_bits()
+    config = Int8WeightOnlyConfig() if bits == 8 else Int4WeightOnlyConfig()
+    label = f"INT{bits}"
+
+    try:
+        quantize_(vl_model.infer, config)
+    except Exception as exc:
+        log.warning("[Quant] quantize_() failed (%s): %s — model stays FP32", label, exc)
+        return
+
+    vl_model._quantization_enabled = True
+    log.info("[Quant] model quantized to %s weight-only", label)
 
 
 def _vlm_ocr_max_pixels() -> int:
