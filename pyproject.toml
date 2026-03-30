@@ -14,7 +14,7 @@ maintainers = [
     {name = "PaddlePaddle", email = "paddleocr@baidu.com"},
 ]
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 keywords = [
     "ocr",
     "textdetection",
