@@ -896,6 +896,93 @@ class TestRunHookWiring:
                 pass
         mock_timing.assert_called_once()
 
+    def test_quantization_called_when_enabled(self):
+        """_enable_quantization is called when PDF_QUANTIZE_ENABLED=true."""
+        with patch("pdf_parser_service._enable_quantization") as mock_quant, \
+             patch("pdf_parser_service._use_mps", return_value=False), \
+             patch("pdf_parser_service._install_dynamic_pixels_hook"), \
+             patch("pdf_parser_service._use_timing", return_value=False), \
+             patch("pdf_parser_service.PaddleOCRVL") as mock_ocr_cls, \
+             patch("pdf_parser_service._pg_dsn", return_value={"host": "localhost", "dbname": "test", "port": 5432, "user": "u", "password": "p"}), \
+             patch("pdf_parser_service._repo_dirs", return_value=["/tmp/test_repo"]), \
+             patch("pdf_parser_service._backup_dir", return_value="/tmp/test_backup"), \
+             patch("pdf_parser_service._staging_dir", return_value=None), \
+             patch("pdf_parser_service._use_vl", return_value=True), \
+             patch("pdf_parser_service._poll_interval", return_value=0), \
+             patch("pdf_parser_service._batch_size", return_value=1), \
+             patch("pdf_parser_service._connect", return_value=MagicMock()), \
+             patch("pdf_parser_service._scan_staging_once"), \
+             patch("pdf_parser_service._fetch_candidates", return_value=[]), \
+             patch("pdf_parser_service.time.sleep", side_effect=SystemExit(0)), \
+             patch("pathlib.Path.mkdir"), \
+             patch.dict(os.environ, {"PDF_QUANTIZE_ENABLED": "true"}, clear=True):
+            mock_ocr_cls.return_value = MagicMock()
+            try:
+                run()
+            except SystemExit:
+                pass
+        mock_quant.assert_called_once()
+
+    def test_quantization_not_called_when_disabled(self):
+        """_enable_quantization is NOT called when PDF_QUANTIZE_ENABLED=false."""
+        with patch("pdf_parser_service._enable_quantization") as mock_quant, \
+             patch("pdf_parser_service._use_mps", return_value=False), \
+             patch("pdf_parser_service._install_dynamic_pixels_hook"), \
+             patch("pdf_parser_service._use_timing", return_value=False), \
+             patch("pdf_parser_service.PaddleOCRVL") as mock_ocr_cls, \
+             patch("pdf_parser_service._pg_dsn", return_value={"host": "localhost", "dbname": "test", "port": 5432, "user": "u", "password": "p"}), \
+             patch("pdf_parser_service._repo_dirs", return_value=["/tmp/test_repo"]), \
+             patch("pdf_parser_service._backup_dir", return_value="/tmp/test_backup"), \
+             patch("pdf_parser_service._staging_dir", return_value=None), \
+             patch("pdf_parser_service._use_vl", return_value=True), \
+             patch("pdf_parser_service._poll_interval", return_value=0), \
+             patch("pdf_parser_service._batch_size", return_value=1), \
+             patch("pdf_parser_service._connect", return_value=MagicMock()), \
+             patch("pdf_parser_service._scan_staging_once"), \
+             patch("pdf_parser_service._fetch_candidates", return_value=[]), \
+             patch("pdf_parser_service.time.sleep", side_effect=SystemExit(0)), \
+             patch("pathlib.Path.mkdir"), \
+             patch.dict(os.environ, {"PDF_QUANTIZE_ENABLED": "false"}, clear=True):
+            mock_ocr_cls.return_value = MagicMock()
+            try:
+                run()
+            except SystemExit:
+                pass
+        mock_quant.assert_not_called()
+
+    def test_quantization_called_before_mps(self):
+        """_enable_quantization is called before _enable_mps_acceleration."""
+        call_order = []
+        def track_quant(e):
+            call_order.append("quant")
+        def track_mps(e):
+            call_order.append("mps")
+        with patch("pdf_parser_service._enable_quantization", side_effect=track_quant), \
+             patch("pdf_parser_service._use_mps", return_value=True), \
+             patch("pdf_parser_service._enable_mps_acceleration", side_effect=track_mps), \
+             patch("pdf_parser_service._install_dynamic_pixels_hook"), \
+             patch("pdf_parser_service._use_timing", return_value=False), \
+             patch("pdf_parser_service.PaddleOCRVL") as mock_ocr_cls, \
+             patch("pdf_parser_service._pg_dsn", return_value={"host": "localhost", "dbname": "test", "port": 5432, "user": "u", "password": "p"}), \
+             patch("pdf_parser_service._repo_dirs", return_value=["/tmp/test_repo"]), \
+             patch("pdf_parser_service._backup_dir", return_value="/tmp/test_backup"), \
+             patch("pdf_parser_service._staging_dir", return_value=None), \
+             patch("pdf_parser_service._use_vl", return_value=True), \
+             patch("pdf_parser_service._poll_interval", return_value=0), \
+             patch("pdf_parser_service._batch_size", return_value=1), \
+             patch("pdf_parser_service._connect", return_value=MagicMock()), \
+             patch("pdf_parser_service._scan_staging_once"), \
+             patch("pdf_parser_service._fetch_candidates", return_value=[]), \
+             patch("pdf_parser_service.time.sleep", side_effect=SystemExit(0)), \
+             patch("pathlib.Path.mkdir"), \
+             patch.dict(os.environ, {"PDF_QUANTIZE_ENABLED": "true"}, clear=True):
+            mock_ocr_cls.return_value = MagicMock()
+            try:
+                run()
+            except SystemExit:
+                pass
+        assert call_order == ["quant", "mps"]
+
 
 class TestQuantizationHelpers:
     def test_use_quantization_true(self):

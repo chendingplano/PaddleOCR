@@ -1108,6 +1108,8 @@ def run() -> None:
         )
         log.info("OCR mode initialized: PaddleOCR")
 
+    if _use_quantization():
+        _enable_quantization(ocr_engine)
     if _use_mps():
         _enable_mps_acceleration(ocr_engine)
     _install_dynamic_pixels_hook(ocr_engine)
