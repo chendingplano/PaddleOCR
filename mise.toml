@@ -295,7 +295,7 @@ if [ ! -f "pdf_parser_service.py" ]; then
   exit 1
 fi
 
-uv run python pdf_parser_service.py
+uv run --extra service python pdf_parser_service.py
 """
 
 [tasks.pdf-parser-service-mps]
@@ -309,7 +309,7 @@ if [ ! -f "pdf_parser_service.py" ]; then
   exit 1
 fi
 
-PDF_MPS=true uv run python pdf_parser_service.py
+PDF_MPS=true uv run --extra service python pdf_parser_service.py
 """
 
 [tasks.test]
