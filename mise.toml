@@ -1,0 +1,387 @@
+[env]
+PYTHON_VERSION = "3.12"
+
+[tasks.venv]
+description = "Create Python virtual environment"
+run = """
+#!/bin/bash
+set -e
+
+if [ ! -d ".venv" ]; then
+  uv venv
+  echo "Virtual environment created"
+else
+  echo "Virtual environment already exists"
+fi
+"""
+
+[tasks.update]
+description = "Pull latest upstream PaddleOCR changes"
+run = """
+#!/bin/bash
+set -e
+
+git pull origin main
+echo "PaddleOCR updated"
+"""
+
+[tasks.install-paddle]
+description = "Install PaddlePaddle framework (CPU version)"
+run = """
+#!/bin/bash
+set -e
+
+# Create venv if it doesn't exist
+if [ ! -d ".venv" ]; then
+  uv venv
+  echo "Virtual environment created"
+fi
+
+# Install PaddlePaddle CPU version using uv
+uv pip install paddlepaddle
+
+echo "PaddlePaddle installed successfully"
+"""
+
+[tasks.install-paddle-gpu]
+description = "Install PaddlePaddle framework (GPU/CUDA version)"
+run = """
+#!/bin/bash
+set -e
+
+# Create venv if it doesn't exist
+if [ ! -d ".venv" ]; then
+  uv venv
+  echo "Virtual environment created"
+fi
+
+# Install PaddlePaddle GPU version (CUDA support) using uv
+uv pip install paddlepaddle-gpu
+
+echo "PaddlePaddle GPU installed successfully"
+"""
+
+[tasks.install-paddleocr]
+description = "Install PaddleOCR (basic - text recognition only)"
+run = """
+#!/bin/bash
+set -e
+
+# Create venv if it doesn't exist
+if [ ! -d ".venv" ]; then
+  uv venv
+  echo "Virtual environment created"
+fi
+
+uv pip install paddleocr
+
+echo "PaddleOCR (basic) installed successfully"
+"""
+
+[tasks.install-all]
+description = "Install PaddleOCR with all features (document parsing, understanding, translation)"
+run = """
+#!/bin/bash
+set -e
+
+# Create venv if it doesn't exist
+if [ ! -d ".venv" ]; then
+  uv venv
+  echo "Virtual environment created"
+fi
+
+uv pip install "paddleocr[all]"
+
+echo "PaddleOCR (all features) installed successfully"
+"""
+
+[tasks.install-service-deps]
+description = "Install dependencies required by pdf_parser_service.py (torch, PyMuPDF, psycopg2)"
+run = """
+#!/bin/bash
+set -e
+
+# Create venv if it doesn't exist
+if [ ! -d ".venv" ]; then
+  uv venv
+  echo "Virtual environment created"
+fi
+
+uv pip install torch pymupdf psycopg2-binary
+
+echo "Service dependencies installed successfully"
+"""
+
+[tasks.install-doc-parser]
+description = "Install PaddleOCR with document parsing features (PP-StructureV3, PaddleOCR-VL)"
+run = """
+#!/bin/bash
+set -e
+
+# Create venv if it doesn't exist
+if [ ! -d ".venv" ]; then
+  uv venv
+  echo "Virtual environment created"
+fi
+
+uv pip install "paddleocr[doc-parser]"
+
+echo "PaddleOCR (document parser) installed successfully"
+"""
+
+[tasks.install-ie]
+description = "Install PaddleOCR with information extraction features (PP-ChatOCRv4)"
+run = """
+#!/bin/bash
+set -e
+
+# Create venv if it doesn't exist
+if [ ! -d ".venv" ]; then
+  uv venv
+  echo "Virtual environment created"
+fi
+
+uv pip install "paddleocr[ie]"
+
+echo "PaddleOCR (information extraction) installed successfully"
+"""
+
+[tasks.install-trans]
+description = "Install PaddleOCR with document translation features (PP-DocTranslation)"
+run = """
+#!/bin/bash
+set -e
+
+# Create venv if it doesn't exist
+if [ ! -d ".venv" ]; then
+  uv venv
+  echo "Virtual environment created"
+fi
+
+uv pip install "paddleocr[trans]"
+
+echo "PaddleOCR (translation) installed successfully"
+"""
+
+[tasks.ocr]
+description = "Run PP-OCRv5 text recognition"
+run = """
+#!/bin/bash
+set -e
+
+INPUT="${1:-https://paddle-model-ecology.bj.bcebos.com/paddlex/imgs/demo_image/general_ocr_002.png}"
+
+uv run paddleocr ocr -i "$INPUT" \
+  --use_doc_orientation_classify False \
+  --use_doc_unwarping False \
+  --use_textline_orientation False
+"""
+
+[tasks.structure]
+description = "Run PP-StructureV3 document parsing"
+run = """
+#!/bin/bash
+set -e
+
+INPUT="${1:-https://paddle-model-ecology.bj.bcebos.com/paddlex/imgs/demo_image/pp_structure_v3_demo.png}"
+
+uv run paddleocr pp_structurev3 -i "$INPUT" \
+  --use_doc_orientation_classify False \
+  --use_doc_unwarping False
+"""
+
+[tasks.chatocr]
+description = "Run PP-ChatOCRv4 information extraction (requires API key)"
+run = """
+#!/bin/bash
+set -e
+
+INPUT="${1:-https://paddle-model-ecology.bj.bcebos.com/paddlex/imgs/demo_image/vehicle_certificate-1.png}"
+KEY="${2:-驾驶室准乘人数}"
+API_KEY="${3:-}"
+
+if [ -z "$API_KEY" ]; then
+  echo "Error: API key is required for PP-ChatOCRv4"
+  echo "Usage: mise run chatocr [image_path] [key] [api_key]"
+  echo "Example: mise run chatocr image.png 驾驶室准乘人数 your_qianfan_api_key"
+  exit 1
+fi
+
+uv run paddleocr pp_chatocrv4_doc -i "$INPUT" \
+  -k "$KEY" \
+  --qianfan_api_key "$API_KEY" \
+  --use_doc_orientation_classify False \
+  --use_doc_unwarping False
+"""
+
+[tasks.doc-parser]
+description = "Run PaddleOCR-VL document parsing"
+run = """
+#!/bin/bash
+set -e
+
+INPUT="${1:-https://paddle-model-ecology.bj.bcebos.com/paddlex/imgs/demo_image/paddleocr_vl_demo.png}"
+
+uv run paddleocr doc_parser -i "$INPUT"
+"""
+
+[tasks.parse-pdf]
+description = "Parse PDF document using PaddleOCR (converts PDF pages to images and OCRs them)"
+run = """
+#!/bin/bash
+set -e
+
+if [ -z "$1" ]; then
+  echo "Error: PDF file path is required"
+  echo "Usage: mise run parse-pdf <pdf_file> [output_dir]"
+  echo "Example: mise run parse-pdf document.pdf output"
+  exit 1
+fi
+
+PDF_FILE="$1"
+OUTPUT_DIR="${2:-output}"
+
+# Ensure pymupdf is installed
+uv pip install -q pymupdf
+
+# Ensure parse_pdf.py exists
+if [ ! -f "parse_pdf.py" ]; then
+  echo "Error: parse_pdf.py not found in current directory"
+  exit 1
+fi
+
+uv run python parse_pdf.py "$PDF_FILE" -o "$OUTPUT_DIR"
+"""
+
+[tasks.parse-pdf-vl]
+description = "Parse PDF document using PaddleOCR-VL (for complex documents with tables, formulas)"
+run = """
+#!/bin/bash
+set -e
+
+if [ -z "$1" ]; then
+  echo "Error: PDF file path is required"
+  echo "Usage: mise run parse-pdf-vl <pdf_file> [output_dir]"
+  echo "Example: mise run parse-pdf-vl document.pdf output"
+  exit 1
+fi
+
+PDF_FILE="$1"
+OUTPUT_DIR="${2:-output}"
+
+# Ensure pymupdf is installed
+uv pip install -q pymupdf
+
+# PaddleOCR-VL requires numpy<2.0
+uv pip install -q "numpy<2.0"
+
+# Ensure parse_pdf.py exists
+if [ ! -f "parse_pdf.py" ]; then
+  echo "Error: parse_pdf.py not found in current directory"
+  exit 1
+fi
+
+uv run python parse_pdf.py "$PDF_FILE" -o "$OUTPUT_DIR" --vl
+"""
+
+[tasks.pdf-parser-service]
+description = "Run PDF parser service in foreground"
+run = """
+#!/bin/bash
+set -e
+
+if [ ! -f "pdf_parser_service.py" ]; then
+  echo "Error: pdf_parser_service.py not found"
+  exit 1
+fi
+
+uv run python pdf_parser_service.py
+"""
+
+[tasks.pdf-parser-service-mps]
+description = "Run PDF parser service with Apple Metal GPU (MPS) acceleration"
+run = """
+#!/bin/bash
+set -e
+
+if [ ! -f "pdf_parser_service.py" ]; then
+  echo "Error: pdf_parser_service.py not found"
+  exit 1
+fi
+
+PDF_MPS=true uv run python pdf_parser_service.py
+"""
+
+[tasks.test]
+description = "Run pdf_parser_service unit tests"
+run = """
+#!/bin/bash
+set -e
+
+uv run python -m pytest tests_custom/test_timing_hooks.py -v
+"""
+
+[tasks.help]
+description = "Show PaddleOCR CLI help"
+run = """
+#!/bin/bash
+set -e
+
+uv run paddleocr ocr --help
+"""
+
+[tasks.clean]
+description = "Clean up installed packages and cached models"
+run = """
+#!/bin/bash
+set -e
+
+echo "Cleaning up PaddleOCR cache..."
+rm -rf ~/.paddleocr
+echo "Cache cleaned"
+"""
+
+[tasks.verify]
+description = "Verify PaddleOCR installation"
+run = """
+#!/bin/bash
+set -e
+
+echo "Checking PaddlePaddle installation..."
+uv run python -c "import paddle; print('PaddlePaddle version:', paddle.__version__)"
+
+echo "Checking PaddleOCR installation..."
+uv run python -c "from paddleocr import PaddleOCR; print('PaddleOCR imported successfully')"
+
+echo "Verification complete!"
+"""
+
+[tasks.demo]
+description = "Run a quick demo to test PaddleOCR installation"
+run = """
+#!/bin/bash
+set -e
+
+echo "Running PaddleOCR demo..."
+uv run python << 'EOF'
+from paddleocr import PaddleOCR
+
+# Initialize OCR
+ocr = PaddleOCR(
+    use_doc_orientation_classify=False,
+    use_doc_unwarping=False,
+    use_textline_orientation=False
+)
+
+# Run on demo image
+result = ocr.predict(
+    input="https://paddle-model-ecology.bj.bcebos.com/paddlex/imgs/demo_image/general_ocr_002.png"
+)
+
+# Print results
+for res in result:
+    res.print()
+EOF
+
+echo "Demo completed!"
+"""
