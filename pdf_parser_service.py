@@ -29,6 +29,7 @@ Optional env vars:
 
 import fitz  # PyMuPDF — imported early so a missing module fails fast
 
+import importlib
 import json
 import logging
 import hashlib
@@ -78,12 +79,12 @@ def _query_to_label(query: str) -> str:
     return _QUERY_LABEL_MAP.get(query.strip().lower(), "ocr")
 
 
-def _vlm_workers() -> int:
-    """Number of concurrent VLM worker threads (PDF_VLM_WORKERS env var, default 1)."""
-    try:
-        return max(1, int(_env("PDF_VLM_WORKERS", "1")))
-    except ValueError:
-        return 1
+# def _vlm_workers() -> int:
+#     """Number of concurrent VLM worker threads (PDF_VLM_WORKERS env var, default 1)."""
+#     try:
+#         return max(1, int(_env("PDF_VLM_WORKERS", "1")))
+#     except ValueError:
+#         return 1
 
 
 def _log_block_type_summary(blocks: list) -> None:
@@ -124,7 +125,6 @@ def _log_block_type_summary(blocks: list) -> None:
 # Configuration
 # ---------------------------------------------------------------------------
 PARSE_OPERATION = "parse"
-PARSING_OPERATION = "parsing"
 TIME_FORMAT = "%Y%m%d %H:%M:%S"
 
 
@@ -202,12 +202,11 @@ def _enable_quantization(ocr_engine) -> None:
     the model unchanged — no crash.
     """
     try:
-        from torchao.quantization import (
-            Int4WeightOnlyConfig,
-            Int8WeightOnlyConfig,
-            quantize_,
-        )
-    except ImportError:
+        quant_mod = importlib.import_module("torchao.quantization")
+        Int4WeightOnlyConfig = getattr(quant_mod, "Int4WeightOnlyConfig")
+        Int8WeightOnlyConfig = getattr(quant_mod, "Int8WeightOnlyConfig")
+        quantize_ = getattr(quant_mod, "quantize_")
+    except (ImportError, AttributeError):
         log.warning("[Quant] torchao not installed — quantization skipped")
         return
 
@@ -280,17 +279,6 @@ def _has_operation(raw_status: str, operation: str) -> bool:
     entries = _decode_status(raw_status)
     op = operation.strip().lower()
     return any(e.get("operation", "").strip().lower() == op for e in entries)
-
-
-def _append_status(raw_status: str, operation: str, status: str, error: str = "") -> str:
-    entries = _decode_status(raw_status)
-    entries.append({
-        "operation": operation,
-        "time": datetime.now().strftime(TIME_FORMAT),
-        "status": status,
-        "error": error,
-    })
-    return json.dumps(entries)
 
 
 def _upsert_status(raw_status: str, operation: str, patch: dict) -> str:
@@ -573,11 +561,11 @@ def _install_timing_hooks(ocr_engine) -> None:
             first = data[0] if data else {}
             img = first.get("image")
             query = first.get("query", "")
-            try:
+            if isinstance(img, np.ndarray) and img.ndim >= 2:
                 pixels = img.shape[0] * img.shape[1]
-            except (AttributeError, TypeError, IndexError):
+            else:
                 pixels = 0
-            label = _query_to_label(query)
+            label = _query_to_label(str(query))
 
             # Reset sub-step accumulator for this block
             _timing_state.current_block = {
@@ -594,7 +582,7 @@ def _install_timing_hooks(ocr_engine) -> None:
             except (AttributeError, TypeError):
                 chars = 0
 
-            block = dict(_timing_state.current_block)
+            block: dict[str, Any] = dict(_timing_state.current_block)
             block.update({"label": label, "pixels": pixels, "chars": chars})
             total_block_ms = block["pre_ms"] + block["xfer_ms"] + block["gen_ms"] + block["post_ms"]
 
@@ -767,6 +755,9 @@ def _run_ocr(ocr_engine, pdf_path: str, work_dir: str, on_progress) -> tuple[lis
             page = doc[page_num]
 
             # Render to RGB numpy array — avoids writing a PNG to disk.
+            _t_render = 0.0
+            _t_save = 0.0
+            _t_array = 0.0
             if _use_timing():
                 _t_render = time.perf_counter()
             pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), colorspace=fitz.csRGB)
@@ -799,8 +790,8 @@ def _run_ocr(ocr_engine, pdf_path: str, work_dir: str, on_progress) -> tuple[lis
             pages.append(_simplify_page_output(page_data, page_num + 1, image_filename))
 
             progress = min(100, int((page_num + 1) * 100 / total_pages)) if total_pages > 0 else 0
-            if (page_num + 1) % PROGRESS_STEP == 0 or page_num + 1 == total_pages:
-                on_progress(int(time.time() - start_ts), progress)
+            # if (page_num + 1) % PROGRESS_STEP == 0 or page_num + 1 == total_pages:
+            on_progress(int(time.time() - start_ts), progress)
             print(f"Parsed page {page_num + 1}/{total_pages}, sec:{int(time.time() - page_start_ts)} (MID_26032733)")
     finally:
         doc.close()
@@ -883,7 +874,8 @@ def _fetch_candidates(conn, batch_size: int) -> list[dict]:
         SELECT id,
                COALESCE(name, ''),
                COALESCE(file_name, ''),
-               COALESCE(status::text, '[]')
+               COALESCE(status::text, '[]'),
+               COALESCE(md5, '')
         FROM kb.inputs
         WHERE LOWER(type) = 'pdf'
           AND (
@@ -898,14 +890,53 @@ def _fetch_candidates(conn, batch_size: int) -> list[dict]:
         rows = cur.fetchall()
 
     return [
-        {"id": r[0], "name": r[1], "file_name": r[2], "status": r[3]}
+        {"id": r[0], "name": r[1], "file_name": r[2], "status": r[3], "md5": r[4]}
         for r in rows
     ]
 
 
-def _record_success(conn, rec_id: int, raw_status: str,
-                    result_filename: str, file_name: str, backup_filename: str) -> None:
-    new_status = _append_status(raw_status, PARSE_OPERATION, "success")
+def _find_duplicate_processed_record(conn, rec_id: int, md5_hex: str) -> int | None:
+    if not md5_hex:
+        return None
+
+    sql = """
+        SELECT id
+        FROM kb.inputs
+        WHERE id <> %s
+          AND md5 = %s
+          AND jsonb_path_exists(
+              COALESCE(status, '[]'::jsonb),
+              '$[*] ? (@.operation == "parse" && (@.status == "success" || @.status == "failed"))'
+          )
+        ORDER BY id ASC
+        LIMIT 1
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql, (rec_id, md5_hex))
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+def _record_success(
+    conn, 
+    rec_id: int, 
+    raw_status: str,
+    result_filename: str, 
+    file_name: str, 
+    backup_filename: str,
+    sec_elapsed: int,
+    loc: str) -> str:
+    new_status = _upsert_status(
+        raw_status,
+        PARSE_OPERATION,
+        {
+            "status": "success",
+            "progress": "100%",
+            "sec_elapsed": sec_elapsed,
+            "errors": "",
+            "loc": loc,
+        },
+    )
     sql = """
         UPDATE kb.inputs
         SET status          = %s::jsonb,
@@ -919,10 +950,25 @@ def _record_success(conn, rec_id: int, raw_status: str,
     with conn.cursor() as cur:
         cur.execute(sql, (new_status, result_filename, file_name, backup_filename, rec_id))
     conn.commit()
+    return new_status
 
 
-def _record_failure(conn, rec_id: int, raw_status: str, error: str) -> None:
-    new_status = _append_status(raw_status, PARSE_OPERATION, "fail", error)
+def _record_failure(
+    conn, 
+    rec_id: int, 
+    raw_status: str, 
+    error: str,
+    loc: str,
+    sec_elapsed: int | None = None) -> str:
+    patch: dict[str, Any] = {
+        "status": "failed",
+        "errors": error,
+        "loc": loc,
+    }
+    if sec_elapsed is not None:
+        patch["sec_elapsed"] = sec_elapsed
+
+    new_status = _upsert_status(raw_status, PARSE_OPERATION, patch)
     sql = """
         UPDATE kb.inputs
         SET status      = %s::jsonb,
@@ -933,18 +979,49 @@ def _record_failure(conn, rec_id: int, raw_status: str, error: str) -> None:
     with conn.cursor() as cur:
         cur.execute(sql, (new_status, error, rec_id))
     conn.commit()
+    return new_status
 
 
-def _record_parsing_active(conn, rec_id: int, raw_status: str,
-                           start_time: str, sec_elapsed: int, progress_pct: int) -> str:
+def _record_duplicated(conn, rec_id: int, raw_status: str, dup_rcd_id: int, loc: str) -> str:
     new_status = _upsert_status(
         raw_status,
-        PARSING_OPERATION,
+        PARSE_OPERATION,
         {
-            "status": "active",
+            "status": "duplicated",
+            "dup_rcd_id": dup_rcd_id,
+            "loc": loc,
+        },
+    )
+    sql = """
+        UPDATE kb.inputs
+        SET status      = %s::jsonb,
+            error_msg   = NULL,
+            modify_time = NOW()
+        WHERE id = %s
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql, (new_status, rec_id))
+    conn.commit()
+    return new_status
+
+
+def _record_parsing_active(
+    conn, 
+    rec_id: int, 
+    raw_status: str,
+    start_time: str, 
+    sec_elapsed: int, 
+    progress_pct: int,
+    loc: str) -> str:
+    new_status = _upsert_status(
+        raw_status,
+        PARSE_OPERATION,
+        {
+            "status": "parsing",
             "start_time": start_time,
             "sec_elapsed": sec_elapsed,
             "progress": f"{progress_pct}%",
+            "loc": loc,
         },
     )
     sql = """
@@ -1001,10 +1078,20 @@ def _process_record(conn, ocr_engine, rec: dict, repo_dirs: list[str],
     rec_id = rec["id"]
     source_file = _resolve_source_path(rec["file_name"], staging_dir)
     raw_status = rec["status"]
+    md5_hex = (rec.get("md5") or "").strip()
+
+    if not md5_hex and source_file and os.path.exists(source_file):
+        md5_hex = _file_md5(source_file)
+
+    dup_rcd_id = _find_duplicate_processed_record(conn, rec_id, md5_hex)
+    if dup_rcd_id is not None:
+        raw_status = _record_duplicated(conn, rec_id, raw_status, dup_rcd_id, "MID_26033008")
+        log.info("record id=%s marked duplicated (dup_rcd_id=%s, md5=%s)", rec_id, dup_rcd_id, md5_hex)
+        return
 
     if not source_file or not os.path.exists(source_file):
-        _record_failure(conn, rec_id, raw_status,
-                        f"source file not accessible: {source_file!r}")
+        raw_status = _record_failure(conn, rec_id, raw_status, "MID_26033006",
+                                     f"source file not accessible: {source_file!r}")
         return
 
     parse_start_dt = datetime.now()
@@ -1018,7 +1105,7 @@ def _process_record(conn, ocr_engine, rec: dict, repo_dirs: list[str],
         def _progress_update(sec_elapsed: int, progress_pct: int) -> None:
             nonlocal raw_status
             raw_status = _record_parsing_active(
-                conn, rec_id, raw_status, parse_start, sec_elapsed, progress_pct
+                conn, rec_id, raw_status, parse_start, sec_elapsed, progress_pct, "MID_26033009"
             )
 
         repo_dir = _choose_repo_dir(repo_dirs)
@@ -1049,20 +1136,21 @@ def _process_record(conn, ocr_engine, rec: dict, repo_dirs: list[str],
         backup_path = _unique_path(backup_dir, os.path.basename(source_file))
         _copy_file(source_file, backup_path)
 
-        _record_success(conn, rec_id, raw_status,
-                        result_path, repo_pdf_path, backup_path)
+        total_seconds = int((datetime.now() - parse_start_dt).total_seconds())
+        raw_status = _record_success(
+            conn, rec_id, raw_status, result_path, repo_pdf_path, backup_path, total_seconds, "MID_26033005"
+        )
 
         if os.path.exists(source_file):
             os.remove(source_file)
 
         log.info("processed record id=%s file=%s result=%s", rec_id, source_file, result_path)
-        total_seconds = int((datetime.now() - parse_start_dt).total_seconds())
         _print_parse_summary("success", total_pages, parse_start, total_seconds, source_file, result_path)
 
     except Exception as exc:
-        _record_failure(conn, rec_id, raw_status, str(exc))
-        log.error("failed to process record id=%s: %s", rec_id, exc)
         total_seconds = int((datetime.now() - parse_start_dt).total_seconds())
+        raw_status = _record_failure(conn, rec_id, raw_status, str(exc), "MID_26033007", total_seconds)
+        log.error("failed to process record id=%s: %s", rec_id, exc)
         _print_parse_summary("fail", total_pages, parse_start, total_seconds, source_file, result_path, str(exc))
 
 
